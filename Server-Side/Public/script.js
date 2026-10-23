@@ -58,10 +58,3 @@ function connectToNewUser(userId, stream) {
   peers[userId] = call;
 }
 
-function addVideoStream(video, stream) {
-  video.srcObject = stream;
-  video.addEventListener("loadedmetadata", () => {
-    video.play();
-  });
-  videoGrid.append(video);
-}
