@@ -5,6 +5,7 @@ const cors = require("cors");
 
 const app = express();
 const server = http.createServer(app);
+const rooms = new Map();
 
 app.use(cors());
 app.use(express.json());
@@ -17,68 +18,96 @@ const io = new Server(server, {
 });
 
 app.get("/", (req, res) => {
-  res.status(200).json({ message: "Signaling server is running" });
+  res.json({ message: "Signaling server is running" });
 });
 
 io.on("connection", (socket) => {
-  console.log(`User connected: ${socket.id}`);
+  console.log(`Connected: ${socket.id}`);
 
   socket.on("join-room", ({ roomId, userName } = {}) => {
-    if (!roomId || !userName) {
-      socket.emit("error-message", "Room ID and username are required");
+    if (
+      typeof roomId !== "string" ||
+      typeof userName !== "string" ||
+      !roomId.trim() ||
+      !userName.trim()
+    ) {
+      socket.emit("error-message", "Room ID and username are required.");
       return;
     }
 
-    socket.join(roomId);
-    socket.data.roomId = roomId;
-    socket.data.userName = userName;
+    // Prevent one socket from joining multiple rooms.
+    const previousRoom = socket.data.roomId;
+    if (previousRoom) {
+      socket.leave(previousRoom);
+      rooms.get(previousRoom)?.delete(socket.id);
+      socket.to(previousRoom).emit("user-disconnected", socket.id);
+    }
 
-    console.log(`${userName} (${socket.id}) joined room: ${roomId}`);
+    const cleanRoom = roomId.trim();
+    const cleanName = userName.trim();
 
-    socket.to(roomId).emit("user-connected", {
+    if (!rooms.has(cleanRoom)) {
+      rooms.set(cleanRoom, new Map());
+    }
+
+    const room = rooms.get(cleanRoom);
+    const existingUsers = [...room.entries()].map(([userId, name]) => ({
+      userId,
+      userName: name,
+    }));
+
+    socket.join(cleanRoom);
+    socket.data.roomId = cleanRoom;
+    socket.data.userName = cleanName;
+    room.set(socket.id, cleanName);
+
+    // Tell the joining participant about peers already in the room.
+    socket.emit("room-users", existingUsers);
+
+    // Tell existing participants about the newcomer.
+    socket.to(cleanRoom).emit("user-connected", {
       userId: socket.id,
-      userName,
+      userName: cleanName,
     });
+
+    console.log(`${cleanName} (${socket.id}) joined ${cleanRoom}`);
   });
 
-  // Relay WebRTC offers to the intended peer.
   socket.on("offer", ({ targetId, offer } = {}) => {
-    if (!targetId || !offer) return;
-
-    io.to(targetId).emit("offer", {
-      senderId: socket.id,
-      offer,
-    });
+    if (targetId && offer) {
+      io.to(targetId).emit("offer", { senderId: socket.id, offer });
+    }
   });
 
-  // Relay WebRTC answers to the intended peer.
   socket.on("answer", ({ targetId, answer } = {}) => {
-    if (!targetId || !answer) return;
-
-    io.to(targetId).emit("answer", {
-      senderId: socket.id,
-      answer,
-    });
+    if (targetId && answer) {
+      io.to(targetId).emit("answer", { senderId: socket.id, answer });
+    }
   });
 
-  // Relay ICE candidates to the intended peer.
   socket.on("ice-candidate", ({ targetId, candidate } = {}) => {
-    if (!targetId || !candidate) return;
-
-    io.to(targetId).emit("ice-candidate", {
-      senderId: socket.id,
-      candidate,
-    });
+    if (targetId && candidate) {
+      io.to(targetId).emit("ice-candidate", {
+        senderId: socket.id,
+        candidate,
+      });
+    }
   });
 
   socket.on("disconnect", () => {
-    const { roomId, userName } = socket.data;
-
-    console.log(`User disconnected: ${socket.id}`);
-
+    const roomId = socket.data.roomId;
     if (roomId) {
+      const room = rooms.get(roomId);
+      room?.delete(socket.id);
+
       socket.to(roomId).emit("user-disconnected", socket.id);
+
+      if (room?.size === 0) {
+        rooms.delete(roomId);
+      }
     }
+
+    console.log(`Disconnected: ${socket.id}`);
   });
 });
 
